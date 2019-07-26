@@ -16,80 +16,90 @@ limitations under the License.
 
 import keras
 from .. import backend
+import numpy as np
 import tensorflow as tf
 from keras import backend as K
 
 
-def softnms(boxes, scores, thresh=0.001, sigma=0.5):
+def py_cpu_softnms(dets, sc, Nt=0.3, sigma=0.5, thresh=0.001, method=2):
     """
-    :param boxes:   boexs 坐标矩阵 format [y1, x1, y2, x2]
-    :param scores: 每个 boxes 对应的分数
+    py_cpu_softnms
+    :param dets:   boexs 坐标矩阵 format [y1, x1, y2, x2]
+    :param sc:     每个 boxes 对应的分数
+    :param Nt:     iou 交叠门限
     :param sigma:  使用 gaussian 函数的方差
     :param thresh: 最后的分数门限
+    :param method: 使用的方法
     :return:       留下的 boxes 的 index
     """
 
-
     # indexes concatenate boxes with the last column
-    N = boxes.get_shape()[0]
-    indexes = K.reshape(K.cast(K.arange(N), dtype='float32'), (N,1))
-    boxes = K.concatenate((boxes, indexes), axis=1)
-
+    N = dets.shape[0]
+    indexes = np.array([np.arange(N)])
+    dets = np.concatenate((dets, indexes.T), axis=1)
 
     # the order of boxes coordinate is [y1,x1,y2,x2]
-    y1 = boxes[:, 0]
-    x1 = boxes[:, 1]
-    y2 = boxes[:, 2]
-    x2 = boxes[:, 3]
+    y1 = dets[:, 0]
+    x1 = dets[:, 1]
+    y2 = dets[:, 2]
+    x2 = dets[:, 3]
+    scores = sc
     areas = (x2 - x1 + 1) * (y2 - y1 + 1)
 
-
     for i in range(N):
-        tscore = K.gather(scores, i)
+        # intermediate parameters for later parameters exchange
+        tBD = dets[i, :].copy()
+        tscore = scores[i].copy()
+        tarea = areas[i].copy()
         pos = i + 1
 
+        #
+        if i != N-1:
+            maxscore = np.max(scores[pos:], axis=0)
+            maxpos = np.argmax(scores[pos:], axis=0)
+        else:
+            maxscore = scores[-1]
+            maxpos = 0
+        if tscore < maxscore:
+            dets[i, :] = dets[maxpos + i + 1, :]
+            dets[maxpos + i + 1, :] = tBD
+            tBD = dets[i, :]
 
-        if i != N - 1:
-            maxscore = K.max(scores[pos:], axis=0)
-            maxpos = K.argmax(scores[pos:], axis=0)
+            scores[i] = scores[maxpos + i + 1]
+            scores[maxpos + i + 1] = tscore
+            tscore = scores[i]
 
+            areas[i] = areas[maxpos + i + 1]
+            areas[maxpos + i + 1] = tarea
+            tarea = areas[i]
 
-            boxes = tf.cond(tscore < maxscore,
-                           lambda: K.concatenate([boxes[:i, :], [boxes[maxpos + i + 1, :]],
-                                                  boxes[i + 1:maxpos + i + 1, :], [boxes[i, :]],
-                                                  boxes[maxpos + i + 2:, :]], axis=0),
-                           lambda: boxes)
-            scores = tf.cond(tscore < maxscore,
-                             lambda: K.concatenate([scores[:i], [scores[maxpos + i + 1]],
-                                                    scores[i + 1:maxpos + i + 1], [scores[i]],
-                                                    scores[maxpos + i + 2:]],axis=0),
-                             lambda: scores)
-            areas = tf.cond(tscore < maxscore,
-                            lambda: K.concatenate([areas[:i], [areas[maxpos + i + 1]],
-                                                   areas[i + 1:maxpos + i + 1], [areas[i]],
-                                                   areas[maxpos + i + 2:]],axis=0),
-                            lambda: areas)
         # IoU calculate
-        xx1 = K.maximum(boxes[i, 1], boxes[pos:, 1])
-        yy1 = K.maximum(boxes[i, 0], boxes[pos:, 0])
-        xx2 = K.minimum(boxes[i, 3], boxes[pos:, 3])
-        yy2 = K.minimum(boxes[i, 2], boxes[pos:, 2])
+        xx1 = np.maximum(dets[i, 1], dets[pos:, 1])
+        yy1 = np.maximum(dets[i, 0], dets[pos:, 0])
+        xx2 = np.minimum(dets[i, 3], dets[pos:, 3])
+        yy2 = np.minimum(dets[i, 2], dets[pos:, 2])
 
-
-        w = K.maximum(0.0, xx2 - xx1 + 1)
-        h = K.maximum(0.0, yy2 - yy1 + 1)
+        w = np.maximum(0.0, xx2 - xx1 + 1)
+        h = np.maximum(0.0, yy2 - yy1 + 1)
         inter = w * h
         ovr = inter / (areas[i] + areas[pos:] - inter)
 
+        # Three methods: 1.linear 2.gaussian 3.original NMS
+        if method == 1:  # linear
+            weight = np.ones(ovr.shape)
+            weight[ovr > Nt] = weight[ovr > Nt] - ovr[ovr > Nt]
+        elif method == 2:  # gaussian
+            weight = np.exp(-(ovr * ovr) / sigma)
+        else:  # original NMS
+            weight = np.ones(ovr.shape)
+            weight[ovr > Nt] = 0
 
-        weight = K.exp(-(ovr * ovr) / sigma)# gaussian
-        scores = K.concatenate([scores[:pos], weight * scores[pos:]], axis=0)
-
+        scores[pos:] = weight * scores[pos:]
 
     # select the boxes and keep the corresponding indexes
-    inds = tf.boolean_mask(boxes[:, 4], scores > thresh)
-    keep = K.cast(inds, dtype='int32')
-
+    inds = dets[:, 4][scores > thresh]
+    keep = inds.astype(int)
+    print(keep)
 
     return keep
 
@@ -132,7 +142,7 @@ def filter_detections(
             filtered_scores = keras.backend.gather(scores, indices)[:, 0]
 
             # perform NMS
-            nms_indices = softnms(filtered_boxes, filtered_scores)
+            nms_indices = py_cpu_softnms(filtered_boxes, filtered_scores)
 
             # filter indices based on NMS
             indices = keras.backend.gather(indices, nms_indices)
