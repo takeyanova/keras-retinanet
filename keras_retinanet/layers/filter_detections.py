@@ -41,12 +41,12 @@ def py_soft_nms(dets,scores, method='gaussian', iou_thr=0.3, sigma=0.5, score_th
     """
     if method not in ('linear', 'gaussian', 'greedy'):
         raise ValueError('method must be linear, gaussian or greedy')
-
+    dets=tf.Variable(dets)
+    dets[:,4].assign(scores)
     x1 = dets[:, 0]
     y1 = dets[:, 1]
     x2 = dets[:, 2]
     y2 = dets[:, 3]
-    dets[:,4]=scores
     areas = (x2 - x1 + 1) * (y2 - y1 + 1)
     # expand dets with areas, and the second dimension is
     # x1, y1, x2, y2, score, area
